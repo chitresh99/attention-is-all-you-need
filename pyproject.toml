@@ -3,5 +3,15 @@ name = "attention-is-all-you-need"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
+authors = [
+    { name = "chitresh99", email = "chitreshpoojary990@gmail.com" }
+]
 requires-python = ">=3.10"
 dependencies = []
+
+[project.scripts]
+attention-is-all-you-need = "attention_is_all_you_need:main"
+
+[build-system]
+requires = ["uv_build>=0.12.21,<0.13.0"]
+build-backend = "uv_build"
