@@ -7,7 +7,9 @@ authors = [
     { name = "chitresh99", email = "chitreshpoojary990@gmail.com" }
 ]
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "black>=26.10.1",
+]
 
 [project.scripts]
 attention-is-all-you-need = "attention_is_all_you_need:main"
