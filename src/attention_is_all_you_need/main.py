@@ -1,6 +1,7 @@
 import random
 from dataclasses import dataclass
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -124,3 +125,19 @@ def iterate_batches(batches, rng):
     rng.shuffle(order)  # batch order reshuffled every epoch
     for i in order:
         yield collate(batches[i])
+
+
+########################
+# Masks
+########################
+
+
+def make_src_mask(src):
+    return (src != PAD)[:, None, None, :]
+
+
+def make_tgt_mask(tgt):
+    T = tgt.size(1)
+    pad = (tgt != PAD)[:, None, None, :]
+    causal = torch.tril(torch.ones(T, T, dtype=torch.bool, device=tgt.device))
+    return pad & causal
