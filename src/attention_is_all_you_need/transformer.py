@@ -79,13 +79,10 @@ def symbols(cfg):
 
 
 def make_pair(rng, cfg, syms):
-    syms = symbols(cfg)
-    rng = random.Random(cfg.seed)
-    train = [make_pair(rng, cfg, syms) for _ in range(cfg.train_pairs)]
-    rng_valid = random.Random(cfg.seed + 10_000)
-    valid = [make_pair(rng_valid, cfg, syms) for _ in range(cfg.valid_pairs)]
-    vocab = Vocab(syms)
-    return train, valid, vocab
+    L = rng.randint(cfg.min_len, cfg.max_len)
+    src = [rng.choice(syms) for _ in range(L)]
+    tgt = src[::-1] if cfg.task == "reverse" else sorted(src)
+    return src, tgt
 
 def build_dataset(cfg):
     syms = symbols(cfg)
