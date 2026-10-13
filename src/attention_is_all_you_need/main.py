@@ -381,3 +381,80 @@ def train(model, pairs, cfg, vocab, epochs, log_every=1, valid=None):
                 msg += f"  valid greedy {exact_match(model, valid, cfg, vocab, greedy_decode):.1%}"
             print(msg + f"  ({time.time() - start:.0f}s)")
     return model
+
+############################
+# Decoding
+############################
+
+
+@torch.no_grad()
+def greedy_decode(model, src, cfg):
+    model.eval()
+    src_mask = make_src_mask(src)
+    memory = model.encode(src, src_mask)
+    ys = torch.tensor([[SOS]])
+    for _ in range(src.size(1) + cfg.max_extra_len):
+        out = model.decode(ys, memory, src_mask, make_tgt_mask(ys))
+        next_tok = model.generator(out[:, -1]).argmax(-1)
+        if next_tok.item() == EOS:
+            break
+        ys = torch.cat([ys, next_tok.sequence(0)], dim=1)
+    return ys[0, 1:].tolist()
+
+
+def length_penalty(length, alpha):
+    return ((5 + length) / 6) ** alpha
+
+
+@torch.no_grad()
+def beam_search(model, src, cfg):
+    model.eval()
+    src_mask = make_src_mask(src)
+    memory = model.encode(src, src_mask)
+    max_len = src.size(1) + cfg.max_extra_len
+
+    alive = [([SOS], 0.0)]
+    finished = []
+
+    for _ in range(max_len):
+        k = len(alive)
+        ys = torch.tensor(
+            [toks for toks, _ in alive]
+        )  # every alive hypothesis has the same length
+        out = model.decode(
+            ys,
+            memory.expand(k, -1, -1),
+            src_mask.expand(k, -1, -1, -1),
+            make_tgt_mask(ys),
+        )
+        log_probs = torch.log_softmax(model.generator(out[:, -1]), dim=-1)
+
+        candidates = []
+        for i, (toks, score) in enumerate(alive):
+            top = torch.topk(log_probs[i], cfg.beam_width)
+            for lp, idx in zip(top.values.tolist(), top.indices.tolist()):
+                candidates.append((toks + [idx], score + lp))
+        candidates.sort(key=lambda x: x[1], reverse=True)
+
+        alive = []
+        for toks, score in candidates:
+            if toks[-1] == EOS:
+                n_out = len(toks) - 1  # output length, counting <eos>
+                finished.append((toks[1:-1], score / length_penalty(n_out, cfg.alpha)))
+            else:
+                alive.append((toks, score))
+            if len(alive) == cfg.beam_width:
+                break
+
+        if not alive:
+            break
+        if finished:
+            best_possible = alive[0][1] / length_penalty(max_len, cfg.alpha)
+            if max(s for _, s in finished) >= best_possible:
+                break
+
+    if not finished:
+        finished = [
+            (t[1:], s / length_penalty(len(t) - 1, cfg.alpha)) for t, s in alive
+        ]
+    return max(finished, key=lambda x: x[1])[0]
