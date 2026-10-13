@@ -1,5 +1,5 @@
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass,replace
 
 import time
 import math
@@ -382,6 +382,7 @@ def train(model, pairs, cfg, vocab, epochs, log_every=1, valid=None):
             print(msg + f"  ({time.time() - start:.0f}s)")
     return model
 
+
 ############################
 # Decoding
 ############################
@@ -458,3 +459,43 @@ def beam_search(model, src, cfg):
             (t[1:], s / length_penalty(len(t) - 1, cfg.alpha)) for t, s in alive
         ]
     return max(finished, key=lambda x: x[1])[0]
+
+
+######################
+# Evalutation
+######################
+
+
+def exact_match(model, pairs, cfg, vocab, decode_fn):
+    correct = 0
+    for pair in pairs:
+        src_ids, _ = tensorize(pair, vocab)
+        tokens = decode_fn(model, torch.tensor([src_ids]), cfg)
+        correct += vocab.decode(tokens) == pair[1]
+    return correct / len(pairs)
+
+
+@torch.no_grad()
+def print_alignment(model, pair, cfg, vocab, layer=-1):
+    model.eval()
+    src_ids, _ = tensorize(pair, vocab)
+    src = torch.tensor([src_ids])
+    out_ids = greedy_decode(model, src, cfg)
+    model(src, torch.tensor([[SOS] + out_ids]))  # one teacher-forced pass to fill .attn
+
+    cols = vocab.decode(src_ids)
+    rows = vocab.decode(out_ids) + [
+        "<eos>"
+    ]  # row i is the step that predicts this token
+    weights = model.decoder.layers[layer].cross_attn.attn[0]  # (h, T_y, T_x)
+    width = max(len(w) for w in cols + ["0.00"]) + 1
+    label = max(len(w) for w in rows) + 2
+    for head in range(weights.size(0)):
+        print(f"  layer {layer % cfg.N}, head {head}")
+        print(" " * label + "".join(w.rjust(width) for w in cols))
+        for word, row in zip(rows, weights[head]):
+            print(
+                word.ljust(label)
+                + "".join(f"{a:.2f}".rjust(width) for a in row.tolist())
+            )
+        print()
