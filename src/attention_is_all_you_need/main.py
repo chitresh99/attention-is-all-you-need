@@ -499,3 +499,138 @@ def print_alignment(model, pair, cfg, vocab, layer=-1):
                 + "".join(f"{a:.2f}".rjust(width) for a in row.tolist())
             )
         print()
+
+#####################################
+# Checks
+#####################################
+
+
+def random_batch(V, lengths, T_y=6):
+    B, T_x = len(lengths), max(lengths)
+    src = torch.full((B, T_x), PAD, dtype=torch.long)
+    for i, L in enumerate(lengths):
+        src[i, :L] = torch.randint(4, V, (L,))
+    tgt_in = torch.randint(4, V, (B, T_y))
+    tgt_in[:, 0] = SOS
+    return src, tgt_in
+
+
+@torch.no_grad()
+def check_shapes(model, cfg, V):
+    model.eval()
+    src, tgt_in = random_batch(V, [7, 5, 7, 3])
+    B, T_x = src.shape
+    T_y = tgt_in.size(1)
+    d, h = cfg.d_model, cfg.h
+
+    src_mask = make_src_mask(src)
+    tgt_mask = make_tgt_mask(tgt_in)
+    assert src_mask.shape == (B, 1, 1, T_x), src_mask.shape
+    assert tgt_mask.shape == (B, 1, T_y, T_y), tgt_mask.shape
+
+    memory = model.encode(src, src_mask)
+    assert memory.shape == (B, T_x, d), memory.shape
+    out = model.decode(tgt_in, memory, src_mask, tgt_mask)
+    assert out.shape == (B, T_y, d), out.shape
+    logits = model(src, tgt_in)
+    assert logits.shape == (B, T_y, V), logits.shape
+
+    enc_attn = model.encoder.layers[0].self_attn.attn
+    dec_self = model.decoder.layers[0].self_attn.attn
+    dec_cross = model.decoder.layers[0].cross_attn.attn
+    assert enc_attn.shape == (B, h, T_x, T_x), enc_attn.shape
+    assert dec_self.shape == (B, h, T_y, T_y), dec_self.shape
+    assert dec_cross.shape == (B, h, T_y, T_x), dec_cross.shape
+
+    print(f"  src mask          (B, 1, 1, T_x)   = {tuple(src_mask.shape)}")
+    print(f"  tgt mask          (B, 1, T_y, T_y) = {tuple(tgt_mask.shape)}")
+    print(f"  memory            (B, T_x, d)      = {tuple(memory.shape)}")
+    print(f"  decoder output    (B, T_y, d)      = {tuple(out.shape)}")
+    print(f"  logits            (B, T_y, V)      = {tuple(logits.shape)}")
+    print(f"  enc self-attn     (B, h, T_x, T_x) = {tuple(enc_attn.shape)}")
+    print(f"  dec self-attn     (B, h, T_y, T_y) = {tuple(dec_self.shape)}")
+    print(f"  dec cross-attn    (B, h, T_y, T_x) = {tuple(dec_cross.shape)}")
+    print(f"  parameters        {sum(p.numel() for p in model.parameters()):,}")
+
+
+@torch.no_grad()
+def check_attention_weights(model, V):
+    model.eval()
+    src, tgt_in = random_batch(V, [7, 5, 7, 3])
+    model(src, tgt_in)
+    src_pad = (src == PAD)[:, None, None, :]  # (B,1,1,T_x)
+    T_y = tgt_in.size(1)
+    future = ~torch.tril(torch.ones(T_y, T_y, dtype=torch.bool))
+
+    for i in range(len(model.encoder.layers)):
+        w = model.encoder.layers[i].self_attn.attn
+        assert torch.allclose(w.sum(-1), torch.ones_like(w.sum(-1))), "rows must sum to 1"
+        assert (w.masked_select(src_pad.expand_as(w)) == 0).all(), "encoder attends to padding"
+    for i in range(len(model.decoder.layers)):
+        w = model.decoder.layers[i].self_attn.attn
+        assert torch.allclose(w.sum(-1), torch.ones_like(w.sum(-1)))
+        assert (w.masked_select(future.expand_as(w)) == 0).all(), "decoder self-attention sees the future"
+        w = model.decoder.layers[i].cross_attn.attn
+        assert torch.allclose(w.sum(-1), torch.ones_like(w.sum(-1)))
+        assert (w.masked_select(src_pad.expand_as(w)) == 0).all(), "cross-attention attends to padding"
+    print("  rows sum to 1, zero weight on padding, zero weight on future positions")
+
+
+@torch.no_grad()
+def check_causal(model, V):
+    """changing target tokens from position k on must not change logits before k."""
+    model.eval()
+    src, tgt_in = random_batch(V, [6, 4], T_y=8)
+    k = 5
+    a = model(src, tgt_in)
+    tgt_changed = tgt_in.clone()
+    tgt_changed[:, k:] = torch.randint(4, V, (2, tgt_in.size(1) - k))
+    b = model(src, tgt_changed)
+    assert torch.allclose(a[:, :k], b[:, :k], atol=1e-5), "information leaks from the future"
+    print(f"  logits at positions < {k} unchanged when tokens >= {k} change")
+
+
+@torch.no_grad()
+def check_padding_invariance(model, V):
+    """appending extra <pad> to the source must not change any output."""
+    model.eval()
+    src, tgt_in = random_batch(V, [6])
+    padded = torch.cat([src, torch.full((1, 4), PAD, dtype=torch.long)], dim=1)
+    a, b = model(src, tgt_in), model(padded, tgt_in)
+    assert torch.allclose(a, b, atol=1e-5), "padding changes the output"
+    print("  outputs identical with 4 extra <pad> tokens on the source")
+
+
+def check_tying(model):
+    assert model.generator.weight is model.embedding.weight
+    print("  embedding and pre-softmax projection share one weight tensor")
+
+
+def check_positional_encoding(model, cfg):
+    pe = model.pe.pe
+    pos, i = 7, 3
+    angle = pos / 10000 ** (2 * i / cfg.d_model)
+    assert math.isclose(pe[pos, 2 * i].item(), math.sin(angle), abs_tol=1e-6)
+    assert math.isclose(pe[pos, 2 * i + 1].item(), math.cos(angle), abs_tol=1e-6)
+    assert not pe.requires_grad
+    print(f"  PE({pos},{2*i}) = sin, PE({pos},{2*i+1}) = cos, values match section 3.5; not trainable")
+
+
+def check_lr_schedule(cfg):
+    rates = [lrate(s, cfg) for s in range(1, 3 * cfg.warmup_steps)]
+    peak_step = rates.index(max(rates)) + 1
+    expected = (cfg.d_model * cfg.warmup_steps) ** -0.5
+    assert peak_step == cfg.warmup_steps, peak_step
+    assert math.isclose(max(rates), expected, rel_tol=1e-9)
+    print(f"  peaks at step {peak_step} with lr {max(rates):.2e} = (d_model * warmup)^-0.5")
+
+
+def check_overfit(cfg, vocab, train_pairs):
+    small_cfg = replace(cfg, warmup_steps=100)
+    torch.manual_seed(cfg.seed)
+    model = Transformer(len(vocab), small_cfg)
+    subset = train_pairs[:20]  # fits in one batch, so one epoch = one step
+    train(model, subset, small_cfg, vocab, cfg.overfit_steps, log_every=100)
+    acc = exact_match(model, subset, small_cfg, vocab, greedy_decode)
+    print(f"  memorised {acc:.0%} of 20 training pairs")
+    return acc
