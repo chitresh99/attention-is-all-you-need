@@ -25,8 +25,8 @@ class Config:
 
     # training
     eps_ls: float = 0.1
-    beta1: float = 0.1
-    beta2: float = 0.9
+    beta1: float = 0.9
+    beta2: float = 0.98
     adam_eps: float = 1e-9
     warmup_steps: int = 400
     tokens_per_batch: int = 1500
@@ -79,10 +79,16 @@ def symbols(cfg):
 
 
 def make_pair(rng, cfg, syms):
-    L = rng.randint(cfg.min_len, cfg.max_len)
-    src = [rng.choice(syms) for _ in range(L)]
-    tgt = src[::-1] if cfg.task == "reverse" else sorted(src)
+    n = rng.randint(cfg.min_len, cfg.max_len)
+    src = [rng.choice(syms) for _ in range(n)]
+    if cfg.task == "reverse":
+        tgt = src[::-1]
+    elif cfg.task == "sort":
+        tgt = sorted(src)
+    else:
+        raise ValueError(f"unknown task {cfg.task}")
     return src, tgt
+
 
 def build_dataset(cfg):
     syms = symbols(cfg)
@@ -92,6 +98,7 @@ def build_dataset(cfg):
     valid = [make_pair(rng_valid, cfg, syms) for _ in range(cfg.valid_pairs)]
     vocab = Vocab(syms)
     return train, valid, vocab
+
 
 def tensorize(pair, vocab):
     src_tokens, tgt_tokens = pair
@@ -166,6 +173,7 @@ def scaled_dot_product_attention(Q, K, V, mask=None):
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, cfg):
+        super().__init__()
         self.h, self.d_k, self.d_v = cfg.h, cfg.d_k, cfg.d_v
         self.W_Q = nn.Linear(cfg.d_model, cfg.h * cfg.d_k, bias=False)
         self.W_K = nn.Linear(cfg.d_model, cfg.h * cfg.d_k, bias=False)
@@ -174,7 +182,7 @@ class MultiHeadAttention(nn.Module):
         self.attn = None
 
     def forward(self, q_in, kv_in, mask):
-        B, T_q = q_in.shape
+        B, T_q, _ = q_in.shape
         T_k = kv_in.size(1)
         Q = self.W_Q(q_in).view(B, T_q, self.h, self.d_k).transpose(1, 2)
         K = self.W_K(kv_in).view(B, T_k, self.h, self.d_k).transpose(1, 2)
@@ -405,7 +413,7 @@ def greedy_decode(model, src, cfg):
         next_tok = model.generator(out[:, -1]).argmax(-1)
         if next_tok.item() == EOS:
             break
-        ys = torch.cat([ys, next_tok.sequence(0)], dim=1)
+        ys = torch.cat([ys, next_tok.unsqueeze(0)], dim=1)
     return ys[0, 1:].tolist()
 
 
