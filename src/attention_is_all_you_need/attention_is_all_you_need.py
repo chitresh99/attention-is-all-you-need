@@ -1,4 +1,5 @@
 import random
+import sys
 from dataclasses import dataclass, replace
 
 import time
@@ -86,6 +87,14 @@ def make_pair(rng, cfg, syms):
     vocab = Vocab(syms)
     return train, valid, vocab
 
+def build_dataset(cfg):
+    syms = symbols(cfg)
+    rng = random.Random(cfg.seed)
+    train = [make_pair(rng, cfg, syms) for _ in range(cfg.train_pairs)]
+    rng_valid = random.Random(cfg.seed + 10_000)
+    valid = [make_pair(rng_valid, cfg, syms) for _ in range(cfg.valid_pairs)]
+    vocab = Vocab(syms)
+    return train, valid, vocab
 
 def tensorize(pair, vocab):
     src_tokens, tgt_tokens = pair
@@ -649,3 +658,44 @@ def check_overfit(cfg, vocab, train_pairs):
     acc = exact_match(model, subset, small_cfg, vocab, greedy_decode)
     print(f"  memorised {acc:.0%} of 20 training pairs")
     return acc
+
+######################
+# Main
+######################
+
+
+def main():
+    task = sys.argv[1] if len(sys.argv) > 1 else "reverse"
+    cfg = Config(task=task)
+    torch.manual_seed(cfg.seed)
+
+    train_pairs, valid_pairs, vocab = build_dataset(cfg)
+    print(f"task: {cfg.task}   vocab {len(vocab)}   train {len(train_pairs)}   valid {len(valid_pairs)}")
+    print(f"  example: {' '.join(train_pairs[0][0])}  ->  {' '.join(train_pairs[0][1])}\n")
+
+    model = Transformer(len(vocab), cfg)
+    print("shapes");               check_shapes(model, cfg, len(vocab))
+    print("attention weights");    check_attention_weights(model, len(vocab))
+    print("causal mask");          check_causal(model, len(vocab))
+    print("padding invariance");   check_padding_invariance(model, len(vocab))
+    print("weight tying");         check_tying(model)
+    print("positional encoding");  check_positional_encoding(model, cfg)
+    print("lr schedule");          check_lr_schedule(cfg)
+    print("overfit 20 pairs");     check_overfit(cfg, vocab, train_pairs)
+
+    print("\ntraining")
+    torch.manual_seed(cfg.seed)
+    model = Transformer(len(vocab), cfg)
+    train(model, train_pairs, cfg, vocab, cfg.epochs, log_every=5, valid=valid_pairs[:100])
+
+    print("\nevaluation on the full validation set")
+    print(f"  greedy exact match  {exact_match(model, valid_pairs, cfg, vocab, greedy_decode):.1%}")
+    print(f"  beam   exact match  {exact_match(model, valid_pairs, cfg, vocab, beam_search):.1%}")
+
+    pair = min(valid_pairs, key=lambda p: abs(len(p[0]) - 6))  # a short example is readable
+    print(f"\ncross-attention, last decoder layer: {' '.join(pair[0])} -> {' '.join(pair[1])}\n")
+    print_alignment(model, pair, cfg, vocab)
+
+
+if __name__ == "__main__":
+    main()
