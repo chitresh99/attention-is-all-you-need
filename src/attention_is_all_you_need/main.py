@@ -1,6 +1,7 @@
 import random
 from dataclasses import dataclass
 
+import time
 import math
 import torch
 import torch.nn as nn
@@ -307,3 +308,76 @@ class Transformer(nn.Module):
         memory = self.encode(src, src_mask)
         out = self.decode(tgt_in, memory, src_mask, tgt_mask)
         return self.generator(out)  # logits (B, T_y, V); softmax lives in the loss
+
+
+#######################
+# Training
+#######################
+
+
+class LabelSmoothingLoss(nn.Module):
+    def __init__(self, vocab_size, eps):
+        super().__init__()
+        self.V, self.eps = vocab_size, eps
+
+    def forward(self, logits, target):
+        log_probs = F.log_softmax(logits, dim=-1)  # (N, V)
+        q = torch.full_like(log_probs, self.eps / (self.V - 2))
+        q.scatter_(1, target.unsqueeze(1), 1.0 - self.eps)
+        q[:, PAD] = 0.0
+        keep = target != PAD
+        smoothed = -(q * log_probs).sum(-1)[keep].sum()
+        nll = F.nll_loss(log_probs, target, ignore_index=PAD, reduction="sum")
+        return smoothed, nll
+
+
+def lrate(step, cfg):
+    step = max(step, 1)
+    return cfg.d_model**-0.5 * min(step**-0.5, step * cfg.warmup_steps**-1.5)
+
+
+def compute_loss(model, src, tgt, criterion):
+    tgt_in = tgt[:, :-1]
+    tgt_out = tgt[:, 1:]
+    logits = model(src, tgt_in)
+    smoothed, nll = criterion(logits.reshape(-1, logits.size(-1)), tgt_out.reshape(-1))
+    n_tokens = (tgt_out != PAD).sum().item()
+    return smoothed / n_tokens, nll.item(), n_tokens
+
+
+def train(model, pairs, cfg, vocab, epochs, log_every=1, valid=None):
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=1.0, betas=(cfg.beta1, cfg.beta2), eps=cfg.adam_eps
+    )
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lambda s: lrate(s + 1, cfg)
+    )
+    criterion = LabelSmoothingLoss(len(vocab), cfg.eps_ls)
+    data = [tensorize(p, vocab) for p in pairs]
+    batches = make_batches(data, cfg)
+    rng = random.Random(cfg.seed)
+    step, start = 0, time.time()
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        total_nll, total_tokens = 0.0, 0
+        for src, tgt in iterate_batches(batches, rng):
+            optimizer.zero_grad()
+            loss, nll, n_tokens = compute_loss(model, src, tgt, criterion)
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            step += 1
+            total_nll += nll
+            total_tokens += n_tokens
+
+        if epoch % log_every == 0 or epoch == 1 or epoch == epochs:
+            per_token = total_nll / total_tokens
+            msg = (
+                f"  epoch {epoch:4d}  step {step:5d}  lr {scheduler.get_last_lr()[0]:.2e}  "
+                f"nll/token {per_token:6.4f}  ppl {math.exp(per_token):7.3f}"
+            )
+            if valid is not None:
+                msg += f"  valid greedy {exact_match(model, valid, cfg, vocab, greedy_decode):.1%}"
+            print(msg + f"  ({time.time() - start:.0f}s)")
+    return model
