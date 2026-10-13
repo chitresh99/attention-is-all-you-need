@@ -1,5 +1,5 @@
 import random
-from dataclasses import dataclass,replace
+from dataclasses import dataclass, replace
 
 import time
 import math
@@ -500,6 +500,7 @@ def print_alignment(model, pair, cfg, vocab, layer=-1):
             )
         print()
 
+
 #####################################
 # Checks
 #####################################
@@ -564,15 +565,23 @@ def check_attention_weights(model, V):
 
     for i in range(len(model.encoder.layers)):
         w = model.encoder.layers[i].self_attn.attn
-        assert torch.allclose(w.sum(-1), torch.ones_like(w.sum(-1))), "rows must sum to 1"
-        assert (w.masked_select(src_pad.expand_as(w)) == 0).all(), "encoder attends to padding"
+        assert torch.allclose(
+            w.sum(-1), torch.ones_like(w.sum(-1))
+        ), "rows must sum to 1"
+        assert (
+            w.masked_select(src_pad.expand_as(w)) == 0
+        ).all(), "encoder attends to padding"
     for i in range(len(model.decoder.layers)):
         w = model.decoder.layers[i].self_attn.attn
         assert torch.allclose(w.sum(-1), torch.ones_like(w.sum(-1)))
-        assert (w.masked_select(future.expand_as(w)) == 0).all(), "decoder self-attention sees the future"
+        assert (
+            w.masked_select(future.expand_as(w)) == 0
+        ).all(), "decoder self-attention sees the future"
         w = model.decoder.layers[i].cross_attn.attn
         assert torch.allclose(w.sum(-1), torch.ones_like(w.sum(-1)))
-        assert (w.masked_select(src_pad.expand_as(w)) == 0).all(), "cross-attention attends to padding"
+        assert (
+            w.masked_select(src_pad.expand_as(w)) == 0
+        ).all(), "cross-attention attends to padding"
     print("  rows sum to 1, zero weight on padding, zero weight on future positions")
 
 
@@ -586,7 +595,9 @@ def check_causal(model, V):
     tgt_changed = tgt_in.clone()
     tgt_changed[:, k:] = torch.randint(4, V, (2, tgt_in.size(1) - k))
     b = model(src, tgt_changed)
-    assert torch.allclose(a[:, :k], b[:, :k], atol=1e-5), "information leaks from the future"
+    assert torch.allclose(
+        a[:, :k], b[:, :k], atol=1e-5
+    ), "information leaks from the future"
     print(f"  logits at positions < {k} unchanged when tokens >= {k} change")
 
 
@@ -613,7 +624,9 @@ def check_positional_encoding(model, cfg):
     assert math.isclose(pe[pos, 2 * i].item(), math.sin(angle), abs_tol=1e-6)
     assert math.isclose(pe[pos, 2 * i + 1].item(), math.cos(angle), abs_tol=1e-6)
     assert not pe.requires_grad
-    print(f"  PE({pos},{2*i}) = sin, PE({pos},{2*i+1}) = cos, values match section 3.5; not trainable")
+    print(
+        f"  PE({pos},{2*i}) = sin, PE({pos},{2*i+1}) = cos, values match section 3.5; not trainable"
+    )
 
 
 def check_lr_schedule(cfg):
@@ -622,7 +635,9 @@ def check_lr_schedule(cfg):
     expected = (cfg.d_model * cfg.warmup_steps) ** -0.5
     assert peak_step == cfg.warmup_steps, peak_step
     assert math.isclose(max(rates), expected, rel_tol=1e-9)
-    print(f"  peaks at step {peak_step} with lr {max(rates):.2e} = (d_model * warmup)^-0.5")
+    print(
+        f"  peaks at step {peak_step} with lr {max(rates):.2e} = (d_model * warmup)^-0.5"
+    )
 
 
 def check_overfit(cfg, vocab, train_pairs):
