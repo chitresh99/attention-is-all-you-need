@@ -86,7 +86,7 @@ These are choices the paper does not dictate, made in this implementation.
 - **The loss returns two numbers.** The smoothed loss, divided by the number of real target tokens, is what gets optimized. The plain negative log-likelihood is what gets reported, so the logged numbers describe the data, not the smoothed objective.
 - **Batches are built by token budget.** Pairs are sorted by length and grouped until the longest sequence times the batch size would exceed `tokens_per_batch`. The batch order is reshuffled every epoch from a seeded generator, so runs are reproducible.
 - **Validation uses its own seed,** so it does not change when the training set size changes.
-- **Beam search stops early** when the best finished hypothesis already beats the best possible score of every live beam, and falls back to live beams if nothing has finished by the length cap.
+- **Beam search stops early** when the best finished hypothesis already beats the best possible score of every live beam, and falls back to live beams if nothing has finished by the length cap. The paper only says to "terminate early when possible" without giving the rule.
 - **The overfit check turns off regularization.** It trains on 20 pairs with dropout and label smoothing set to 0 and warmup set to 400, so it measures pure memorisation. With regularization on, the check cannot reach 100% and stops being a clean test.
 - **Everything is seeded.** Running the same task twice gives identical losses, accuracies and attention weights on CPU.
 
@@ -211,7 +211,7 @@ For `a k s s i q` to `a i k q s s` there is no diagonal at all. The model finds 
 
 When the decoder attends to the copies of a symbol, it gives each copy equal weight. Attention returns a weighted average of the values it attends to, and the average of four identical `l` vectors is the same as the average of three. So cross-attention can retrieve "this is an `l`" but cannot directly see how many copies there are.
 
-To know when to stop emitting a symbol, the model has to count indirectly: by how much attention mass that symbol takes relative to the rest of the source, or by tracking through decoder self-attention how many copies it has already written. That indirect counting gets less precise as the count grows. Counts of two are reliable, and counts of three and four occasionally slip by one, which is exactly what the two failures show. This is a property of attention, not a bug in the implementation.
+To know when to stop emitting a symbol, the model has to count indirectly: by how much attention mass that symbol takes relative to the rest of the source, or by tracking through decoder self-attention how many copies it has already written. That indirect counting gets less precise as the count grows. Counts of two are reliable, and counts of three and four occasionally slip by one, which is exactly what the two failures show. This is a property of attention, not a bug in the implementation. The paper itself names the cost in section 2: relating positions through attention comes with reduced effective resolution, because attention averages the positions it weights. Multi-head attention offsets this but does not remove it.
 
 Beam search cannot recover these errors. The model is confident it has finished the symbol, so every beam moves on at the same point.
 
