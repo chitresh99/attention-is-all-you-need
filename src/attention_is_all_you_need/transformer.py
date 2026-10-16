@@ -8,21 +8,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from collections import Counter
+
 ########################
 # Config
 ########################
 
-
 @dataclass
 class Config:
-    N: int = 2
+    N: int = 3                  # was 2: sort needs more depth for counting/comparing
     d_model: int = 128
     d_ff: int = 512
     h: int = 4
     d_k: int = 32
     d_v: int = 32
     P_drop: float = 0.1
-
+ 
     # training
     eps_ls: float = 0.1
     beta1: float = 0.9
@@ -30,24 +31,28 @@ class Config:
     adam_eps: float = 1e-9
     warmup_steps: int = 400
     tokens_per_batch: int = 1500
-
-    epochs: int = 20
-
+ 
+    epochs: int = 60            # was 20: neither run had converged
+ 
     # decoding
     beam_width: int = 4
     alpha: float = 0.6
     max_extra_len: int = 50
-
+ 
     # data
-    task: str = "reverse"  # "reverse" | "sort"
+    task: str = "sort"       # "reverse" | "sort"
     num_symbols: int = 20
     min_len: int = 3
     max_len: int = 12
-    train_pairs: int = 10000
+    train_pairs: int = 20000    # was 10000: more examples of repeated-symbol counts
     valid_pairs: int = 300
     max_positions: int = 512
-
+ 
+    # overfit sanity check: no regularisation, gentler LR
     overfit_steps: int = 400
+    overfit_warmup: int = 400   # was hard-coded 100 -> peak lr 8.8e-3, too high
+    overfit_drop: float = 0.0
+    overfit_ls: float = 0.0
     seed: int = 0
 
 
@@ -514,6 +519,32 @@ def print_alignment(model, pair, cfg, vocab, layer=-1):
             )
         print()
 
+def print_failures(model, pairs, cfg, vocab, decode_fn):
+    """print every wrong prediction and what kind of mistake it is."""
+    failures = 0
+    for pair in pairs:
+        src, tgt = pair
+        src_ids, _ = tensorize(pair, vocab)
+        pred = vocab.decode(decode_fn(model, torch.tensor([src_ids]), cfg))
+        if pred == tgt:
+            continue
+        failures += 1
+ 
+        if len(pred) != len(tgt):
+            kind = f"wrong length ({len(pred)} vs {len(tgt)})"
+        elif Counter(pred) != Counter(tgt):
+            missing = Counter(tgt) - Counter(pred)
+            extra = Counter(pred) - Counter(tgt)
+            kind = f"wrong symbols (missing {dict(missing)}, extra {dict(extra)})"
+        else:
+            kind = "right symbols, wrong order"
+ 
+        repeats = {s: c for s, c in Counter(src).items() if c > 1}
+        print(f"  src   {' '.join(src)}   (len {len(src)}, repeats {repeats or 'none'})")
+        print(f"  want  {' '.join(tgt)}")
+        print(f"  got   {' '.join(pred)}")
+        print(f"  -> {kind}\n")
+    print(f"  {failures} failures out of {len(pairs)}")
 
 #####################################
 # Checks
@@ -655,14 +686,20 @@ def check_lr_schedule(cfg):
 
 
 def check_overfit(cfg, vocab, train_pairs):
-    small_cfg = replace(cfg, warmup_steps=100)
+    small_cfg = replace(
+        cfg,
+        warmup_steps=cfg.overfit_warmup,
+        P_drop=cfg.overfit_drop,
+        eps_ls=cfg.overfit_ls,
+    )
     torch.manual_seed(cfg.seed)
     model = Transformer(len(vocab), small_cfg)
-    subset = train_pairs[:20]  # fits in one batch, so one epoch = one step
+    subset = train_pairs[:20]
     train(model, subset, small_cfg, vocab, cfg.overfit_steps, log_every=100)
     acc = exact_match(model, subset, small_cfg, vocab, greedy_decode)
     print(f"  memorised {acc:.0%} of 20 training pairs")
     return acc
+
 
 ######################
 # Main
@@ -675,30 +712,54 @@ def main():
     torch.manual_seed(cfg.seed)
 
     train_pairs, valid_pairs, vocab = build_dataset(cfg)
-    print(f"task: {cfg.task}   vocab {len(vocab)}   train {len(train_pairs)}   valid {len(valid_pairs)}")
-    print(f"  example: {' '.join(train_pairs[0][0])}  ->  {' '.join(train_pairs[0][1])}\n")
+    print(
+        f"task: {cfg.task}   vocab {len(vocab)}   train {len(train_pairs)}   valid {len(valid_pairs)}"
+    )
+    print(
+        f"  example: {' '.join(train_pairs[0][0])}  ->  {' '.join(train_pairs[0][1])}\n"
+    )
 
     model = Transformer(len(vocab), cfg)
-    print("shapes");               check_shapes(model, cfg, len(vocab))
-    print("attention weights");    check_attention_weights(model, len(vocab))
-    print("causal mask");          check_causal(model, len(vocab))
-    print("padding invariance");   check_padding_invariance(model, len(vocab))
-    print("weight tying");         check_tying(model)
-    print("positional encoding");  check_positional_encoding(model, cfg)
-    print("lr schedule");          check_lr_schedule(cfg)
-    print("overfit 20 pairs");     check_overfit(cfg, vocab, train_pairs)
+    print("shapes")
+    check_shapes(model, cfg, len(vocab))
+    print("attention weights")
+    check_attention_weights(model, len(vocab))
+    print("causal mask")
+    check_causal(model, len(vocab))
+    print("padding invariance")
+    check_padding_invariance(model, len(vocab))
+    print("weight tying")
+    check_tying(model)
+    print("positional encoding")
+    check_positional_encoding(model, cfg)
+    print("lr schedule")
+    check_lr_schedule(cfg)
+    print("overfit 20 pairs")
+    check_overfit(cfg, vocab, train_pairs)
 
     print("\ntraining")
     torch.manual_seed(cfg.seed)
     model = Transformer(len(vocab), cfg)
-    train(model, train_pairs, cfg, vocab, cfg.epochs, log_every=5, valid=valid_pairs[:100])
+    train(
+        model, train_pairs, cfg, vocab, cfg.epochs, log_every=5, valid=valid_pairs[:100]
+    )
 
     print("\nevaluation on the full validation set")
-    print(f"  greedy exact match  {exact_match(model, valid_pairs, cfg, vocab, greedy_decode):.1%}")
-    print(f"  beam   exact match  {exact_match(model, valid_pairs, cfg, vocab, beam_search):.1%}")
+    print("\nfailures (greedy)")
+    print_failures(model, valid_pairs, cfg, vocab, greedy_decode)
+    print(
+        f"  greedy exact match  {exact_match(model, valid_pairs, cfg, vocab, greedy_decode):.1%}"
+    )
+    print(
+        f"  beam   exact match  {exact_match(model, valid_pairs, cfg, vocab, beam_search):.1%}"
+    )
 
-    pair = min(valid_pairs, key=lambda p: abs(len(p[0]) - 6))  # a short example is readable
-    print(f"\ncross-attention, last decoder layer: {' '.join(pair[0])} -> {' '.join(pair[1])}\n")
+    pair = min(
+        valid_pairs, key=lambda p: abs(len(p[0]) - 6)
+    )  # a short example is readable
+    print(
+        f"\ncross-attention, last decoder layer: {' '.join(pair[0])} -> {' '.join(pair[1])}\n"
+    )
     print_alignment(model, pair, cfg, vocab)
 
 
